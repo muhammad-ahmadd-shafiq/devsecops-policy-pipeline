@@ -1,0 +1,45 @@
+name: DevSecOps Policy Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Test and build application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: python -m pytest -v
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag devsecops-policy-pipeline:${{ github.sha }} \
+            .
+
+      - name: Inspect image
+        run: docker image inspect \
+          devsecops-policy-pipeline:${{ github.sha }}
