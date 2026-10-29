@@ -41,5 +41,4 @@ jobs:
             .
 
       - name: Inspect image
-        run: docker image inspect \
-          devsecops-policy-pipeline:${{ github.sha }}
+        run: docker image inspect devsecops-policy-pipeline:${{ github.sha }}
