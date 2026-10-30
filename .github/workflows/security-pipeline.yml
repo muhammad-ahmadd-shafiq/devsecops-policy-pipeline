@@ -1,3 +1,4 @@
+
 name: DevSecOps Policy Pipeline
 
 on:
@@ -11,18 +12,32 @@ permissions:
   contents: read
 
 jobs:
-  test-and-build:
-    name: Test and build application
-    runs-on: ubuntu-24.04
+  secrets:
+    name: Gate 0 - Secret detection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  source-security:
+    name: Gate 1 - Source and dependencies
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v7.1.0
         with:
-          python-version: "3.12.11"
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: |
             requirements.txt
@@ -34,11 +49,60 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -v
 
-      - name: Build Docker image
+      - name: Run Bandit
+        run: |
+          python -m pip install bandit==1.8.6
+          bandit -r app -ll
+
+      - name: Audit Python dependencies
+        run: |
+          python -m pip install pip-audit==2.9.0
+          pip-audit -r requirements.txt
+
+  dockerfile-lint:
+    name: Gate 0 - Dockerfile lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run Hadolint
+        run: |
+          docker run --rm \
+            -i hadolint/hadolint:v2.15.1 \
+            hadolint --failure-threshold warning - < Dockerfile
+
+  container-security:
+    name: Gate 2 - Container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build image
         run: |
           docker build \
             --tag devsecops-policy-pipeline:${{ github.sha }} \
             .
 
-      - name: Inspect image
-        run: docker image inspect devsecops-policy-pipeline:${{ github.sha }}
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: image
+          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy SARIF
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container
