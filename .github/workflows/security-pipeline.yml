@@ -97,6 +97,15 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          format: table
+
+      - name: Generate Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
+          scanners: vuln
           format: sarif
           output: trivy-results.sarif
 
