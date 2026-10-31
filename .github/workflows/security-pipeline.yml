@@ -1,3 +1,4 @@
+
 name: DevSecOps Policy Pipeline
 
 run-name: "DevSecOps Policy Pipeline: ${{ github.event_name }} on ${{ github.ref_name }} (run #${{ github.run_number }})"
@@ -268,4 +269,93 @@ jobs:
               sys.exit(1)
 
           print("PASS: Conftest detected all three expected Terraform policy violations.")
+          PY
+
+  # ===========================================================
+  # Gate 5: Kubernetes policy enforcement
+  # ===========================================================
+  kubernetes-security:
+    name: "Gate 5: Kubernetes policy enforcement"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Conftest
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.71.1/conftest_0.71.1_Linux_x86_64.tar.gz \
+            -o /tmp/conftest.tar.gz
+
+          sudo tar -C /usr/local/bin -xzf /tmp/conftest.tar.gz conftest
+
+          conftest --version
+
+      # Verify the custom Kubernetes Rego unit tests.
+      - name: Verify Kubernetes Rego policies
+        run: |
+          conftest verify \
+            --policy policies/conftest/kubernetes
+
+      # The real application Deployment must pass.
+      - name: Validate secure Kubernetes manifests
+        run: |
+          conftest test \
+            --policy policies/conftest/kubernetes \
+            k8s/deployment.yaml
+
+      # The insecure fixture must fail with all expected violations.
+      # Python interprets the expected nonzero exit code as a successful negative test.
+      - name: Verify detection of insecure Kubernetes manifests
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          command = [
+              "conftest", "test",
+              "--policy", "policies/conftest/kubernetes",
+              "k8s/bad-deployments",
+          ]
+
+          result = subprocess.run(
+              command,
+              capture_output=True,
+              text=True,
+          )
+
+          output = result.stdout + result.stderr
+
+          expected_violations = [
+              "must explicitly run as non-root",
+              "must not run with user ID 0",
+              "must not run as privileged",
+              "must define CPU requests",
+              "must define memory requests",
+              "must define CPU limits",
+              "must define memory limits",
+              "must not use the latest image tag",
+              "must disable automatic ServiceAccount token mounting",
+          ]
+
+          if result.returncode == 0:
+              print("ERROR: Insecure Kubernetes manifest unexpectedly passed.")
+              print(output)
+              sys.exit(1)
+
+          missing = [
+              violation
+              for violation in expected_violations
+              if violation not in output
+          ]
+
+          if missing:
+              print("ERROR: Expected policy violations were not detected:")
+              for violation in missing:
+                  print(f"- {violation}")
+              print(output)
+              sys.exit(1)
+
+          print("PASS: All expected Kubernetes policy violations were detected.")
           PY
