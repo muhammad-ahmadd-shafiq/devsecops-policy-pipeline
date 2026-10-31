@@ -72,6 +72,144 @@ jobs:
             -i hadolint/hadolint:v2.15.1 \
             hadolint --failure-threshold warning - < Dockerfile
 
+  terraform-security:
+    name: Gate 3 - Infrastructure and policy security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install checkov==3.4.0
+          checkov --version
+
+      - name: Install Conftest
+        run: |
+          curl -sSL \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.71.1/conftest_0.71.1_Linux_x86_64.tar.gz \
+            -o /tmp/conftest.tar.gz
+
+          sudo tar -C /usr/local/bin -xzf /tmp/conftest.tar.gz conftest
+          conftest --version
+
+      # Checkov: secure Terraform must pass.
+      - name: Check secure Terraform configuration
+        run: |
+          checkov \
+            --directory terraform/secure \
+            --framework terraform \
+            --compact
+
+      # Checkov: insecure Terraform must produce findings.
+      # These failures are expected because this is a negative test fixture.
+      - name: Verify Checkov detects insecure Terraform
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          command = [
+              "checkov",
+              "--directory", "terraform/insecure",
+              "--framework", "terraform",
+              "--output", "json",
+          ]
+
+          result = subprocess.run(
+              command,
+              capture_output=True,
+              text=True,
+          )
+
+          try:
+              report = json.loads(result.stdout)
+          except json.JSONDecodeError:
+              print("ERROR: Could not parse Checkov JSON output.")
+              print(result.stdout)
+              print(result.stderr)
+              sys.exit(1)
+
+          failed_checks = report.get("results", {}).get("failed_checks", [])
+
+          if result.returncode == 0 or not failed_checks:
+              print("ERROR: Checkov did not detect the expected insecure configuration.")
+              sys.exit(1)
+
+          print(f"PASS: Checkov detected {len(failed_checks)} insecure Terraform configuration(s).")
+          PY
+
+      # Conftest: validate the Rego policy unit tests.
+      - name: Verify Terraform Rego policy tests
+        run: |
+          conftest verify \
+            --policy policies/conftest/terraform
+
+      # Conftest: secure Terraform must pass every policy.
+      - name: Test secure Terraform with Conftest
+        run: |
+          conftest test \
+            --policy policies/conftest/terraform \
+            --parser hcl2 \
+            terraform/secure
+
+      # Conftest: insecure Terraform must trigger all three custom rules.
+      - name: Verify Conftest detects insecure Terraform
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          command = [
+              "conftest", "test",
+              "--policy", "policies/conftest/terraform",
+              "--parser", "hcl2",
+              "terraform/insecure",
+          ]
+
+          result = subprocess.run(
+              command,
+              capture_output=True,
+              text=True,
+          )
+
+          output = result.stdout + result.stderr
+
+          expected_violations = [
+              "must encrypt every root EBS volume",
+              "must not have a public IP address",
+              "must not expose SSH to 0.0.0.0/0",
+          ]
+
+          missing = [
+              violation
+              for violation in expected_violations
+              if violation not in output
+          ]
+
+          if result.returncode == 0:
+              print("ERROR: Conftest unexpectedly allowed insecure Terraform.")
+              print(output)
+              sys.exit(1)
+
+          if missing:
+              print("ERROR: Conftest did not report every expected violation:")
+              for violation in missing:
+                  print(f"- {violation}")
+              print(output)
+              sys.exit(1)
+
+          print("PASS: Conftest detected all three expected Terraform policy violations.")
+          PY
+
   container-security:
     name: Gate 2 - Container image
     runs-on: ubuntu-latest

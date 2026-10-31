@@ -1,10 +1,107 @@
-.venv/
-venv/
+```gitignore
+# ==========================================
+# Python
+# ==========================================
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing and coverage
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ==========================================
+# Environment variables and secrets
+# ==========================================
 .env
 .env.*
 !.env.example
+!.env.*.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# ==========================================
+# Terraform
+# ==========================================
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Terraform variable files may contain secrets
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Terraform crash logs
+crash.log
+crash.*.log
+
+# Terraform override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep Terraform dependency lock files!
+# Do not ignore .terraform.lock.hcl
+
+# ==========================================
+# Docker
+# ==========================================
+*.tar
+*.tar.gz
+
+# ==========================================
+# Security scanner outputs
+# ==========================================
+*.sarif
+checkov-report.json
+trivy-report.json
+bandit-report.json
+
+# ==========================================
+# Logs and temporary files
+# ==========================================
 *.log
+*.tmp
+*.temp
+
+# ==========================================
+# Editors and operating systems
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
 .DS_Store
+Thumbs.db
+Desktop.ini
+```
