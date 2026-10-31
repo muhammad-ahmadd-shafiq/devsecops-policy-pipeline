@@ -1,5 +1,6 @@
-
 name: DevSecOps Policy Pipeline
+
+run-name: "DevSecOps Policy Pipeline: ${{ github.event_name }} on ${{ github.ref_name }} (run #${{ github.run_number }})"
 
 on:
   push:
@@ -12,8 +13,11 @@ permissions:
   contents: read
 
 jobs:
+  # ===========================================================
+  # Gate 0: Secret detection
+  # ===========================================================
   secrets:
-    name: Gate 0 - Secret detection
+    name: "Gate 0: Secret detection"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository history
@@ -21,20 +25,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Scan for secrets
+      - name: Scan for secrets (Gitleaks)
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
 
+  # ===========================================================
+  # Gate 1: Source code and dependencies
+  # ===========================================================
   source-security:
-    name: Gate 1 - Source and dependencies
+    name: "Gate 1: Source and dependencies"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
@@ -46,41 +53,94 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
-      - name: Run unit tests
+      - name: Run unit tests (pytest)
         run: python -m pytest -v
 
-      - name: Run Bandit
+      - name: Run static analysis (Bandit)
         run: |
           python -m pip install bandit==1.8.6
           bandit -r app -ll
 
-      - name: Audit Python dependencies
+      - name: Audit Python dependencies (pip-audit)
         run: |
           python -m pip install pip-audit==2.9.0
           pip-audit -r requirements.txt
 
+  # ===========================================================
+  # Gate 2: Dockerfile
+  # ===========================================================
   dockerfile-lint:
-    name: Gate 0 - Dockerfile lint
+    name: "Gate 2: Dockerfile lint"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Run Hadolint
+      - name: Lint Dockerfile (Hadolint)
         run: |
           docker run --rm \
             -i hadolint/hadolint:v2.15.1 \
             hadolint --failure-threshold warning - < Dockerfile
 
+  # ===========================================================
+  # Gate 3: Container image
+  # ===========================================================
+  container-security:
+    name: "Gate 3: Container image"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build image
+        run: |
+          docker build \
+            --tag devsecops-policy-pipeline:${{ github.sha }} \
+            .
+
+      - name: Scan image with Trivy (fail on HIGH and CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Generate Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
+          scanners: vuln
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy SARIF to Code Scanning
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container
+
+  # ===========================================================
+  # Gate 4: Infrastructure as Code and policy
+  # ===========================================================
   terraform-security:
-    name: Gate 3 - Infrastructure and policy security
+    name: "Gate 4: Infrastructure and policy"
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
@@ -101,7 +161,7 @@ jobs:
           conftest --version
 
       # Checkov: secure Terraform must pass.
-      - name: Check secure Terraform configuration
+      - name: "Checkov: secure Terraform must pass"
         run: |
           checkov \
             --directory terraform/secure \
@@ -110,7 +170,7 @@ jobs:
 
       # Checkov: insecure Terraform must produce findings.
       # These failures are expected because this is a negative test fixture.
-      - name: Verify Checkov detects insecure Terraform
+      - name: "Checkov: insecure Terraform must be detected"
         run: |
           python - <<'PY'
           import json
@@ -148,13 +208,13 @@ jobs:
           PY
 
       # Conftest: validate the Rego policy unit tests.
-      - name: Verify Terraform Rego policy tests
+      - name: "Conftest: verify Rego policy tests"
         run: |
           conftest verify \
             --policy policies/conftest/terraform
 
       # Conftest: secure Terraform must pass every policy.
-      - name: Test secure Terraform with Conftest
+      - name: "Conftest: secure Terraform must pass"
         run: |
           conftest test \
             --policy policies/conftest/terraform \
@@ -162,7 +222,7 @@ jobs:
             terraform/secure
 
       # Conftest: insecure Terraform must trigger all three custom rules.
-      - name: Verify Conftest detects insecure Terraform
+      - name: "Conftest: insecure Terraform must be detected"
         run: |
           python - <<'PY'
           import subprocess
@@ -209,47 +269,3 @@ jobs:
 
           print("PASS: Conftest detected all three expected Terraform policy violations.")
           PY
-
-  container-security:
-    name: Gate 2 - Container image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Build image
-        run: |
-          docker build \
-            --tag devsecops-policy-pipeline:${{ github.sha }} \
-            .
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      - name: Generate Trivy SARIF report
-        if: always()
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          scan-ref: devsecops-policy-pipeline:${{ github.sha }}
-          scanners: vuln
-          format: sarif
-          output: trivy-results.sarif
-
-      - name: Upload Trivy SARIF
-        if: always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-container
