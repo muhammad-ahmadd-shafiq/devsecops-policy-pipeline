@@ -154,7 +154,7 @@ jobs:
 
       - name: Install Conftest
         run: |
-          curl -sSL \
+          curl --fail --location --silent --show-error \
             https://github.com/open-policy-agent/conftest/releases/download/v0.71.1/conftest_0.71.1_Linux_x86_64.tar.gz \
             -o /tmp/conftest.tar.gz
 
@@ -360,16 +360,20 @@ jobs:
           print("PASS: All expected Kubernetes policy violations were detected.")
           PY
 
+  # ===========================================================
+  # Gate 6: Software supply-chain security
+  # ===========================================================
   supply-chain-security:
-    name: Gate 4 - Software supply-chain security
+    name: "Gate 6: Software supply-chain security"
 
-    # Publish only after the existing security gates succeed.
+    # Publish only after every security gate succeeds.
     needs:
       - secrets
       - source-security
       - dockerfile-lint
-      - terraform-security
       - container-security
+      - terraform-security
+      - kubernetes-security
 
     # Do not publish images from pull requests.
     # Allow main-branch pushes and manual runs on main.
@@ -421,6 +425,18 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=devsecops-policy-pipeline
+
+      # Scan the exact published digest before signing or attesting it.
+      - name: Scan published image digest with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          scan-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
       # Generate a CycloneDX SBOM from the published image.
       - name: Generate container SBOM
@@ -475,6 +491,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign verify-attestation \
+            --type cyclonedx \
             --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${IMAGE_NAME}@${IMAGE_DIGEST}"
