@@ -359,3 +359,122 @@ jobs:
 
           print("PASS: All expected Kubernetes policy violations were detected.")
           PY
+
+  supply-chain-security:
+    name: Gate 4 - Software supply-chain security
+
+    # Publish only after the existing security gates succeed.
+    needs:
+      - secrets
+      - source-security
+      - dockerfile-lint
+      - terraform-security
+      - container-security
+
+    # Do not publish images from pull requests.
+    # Allow main-branch pushes and manual runs on main.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    env:
+      IMAGE_NAME: ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.0
+        with:
+          cosign-release: v3.1.3
+
+      - name: Check Cosign installation
+        run: cosign version
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build and push an immutable commit-tagged image.
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=devsecops-policy-pipeline
+
+      # Generate a CycloneDX SBOM from the published image.
+      - name: Generate container SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Upload the SBOM as a downloadable workflow artifact.
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Sign the immutable image digest using GitHub OIDC.
+      - name: Sign container image with Cosign
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+      # Verify that the signature belongs to this workflow.
+      - name: Verify container image signature
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+      # Attach the SBOM to the exact image digest as an attestation.
+      - name: Create SBOM attestation
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign attest \
+            --yes \
+            --type cyclonedx \
+            --predicate sbom.cdx.json \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+      # Verify the attestation's signature and identity.
+      - name: Verify SBOM attestation
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify-attestation \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}"

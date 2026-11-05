@@ -100,7 +100,8 @@ bandit-report.json
 *.swp
 *.swo
 *~
-
+# Generated Software Bill of Materials
+sbom*.json
 .DS_Store
 Thumbs.db
 Desktop.ini
