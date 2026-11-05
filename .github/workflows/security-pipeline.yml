@@ -490,8 +490,14 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign verify-attestation \
-            --type cyclonedx \
-            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${IMAGE_NAME}@${IMAGE_DIGEST}"
+          echo "Starting SBOM attestation verification..."
+
+          timeout --signal=TERM --kill-after=10s 3m \
+            cosign --verbose --timeout 2m verify-attestation \
+              --type cyclonedx \
+              --output text \
+              --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+          echo "SBOM attestation successfully verified."
