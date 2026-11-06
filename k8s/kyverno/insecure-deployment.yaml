@@ -1,0 +1,38 @@
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: insecure-policy-pipeline
+  namespace: policy-pipeline
+  labels:
+    app: policy-pipeline
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: policy-pipeline
+
+  template:
+    metadata:
+      labels:
+        app: policy-pipeline
+
+    spec:
+      automountServiceAccountToken: true
+
+      containers:
+        - name: insecure-app
+
+          image: nginx:latest
+
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            privileged: true
+            allowPrivilegeEscalation: true
+
+          ports:
+            - containerPort: 80

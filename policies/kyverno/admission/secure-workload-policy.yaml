@@ -1,0 +1,162 @@
+
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+
+metadata:
+  name: devsecops-secure-workloads
+
+spec:
+  validationActions:
+    - Deny
+
+  webhookConfiguration:
+    timeoutSeconds: 15
+
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        app: policy-pipeline
+
+    resourceRules:
+      # Core API group: Pods
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - pods
+
+      # Apps API group: Deployments and other controllers
+      - apiGroups:
+          - apps
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+          - replicasets
+
+      # Batch API group: Jobs and CronJobs
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+          - cronjobs
+
+  variables:
+    - name: podSpec
+      expression: >-
+        object.kind == 'Pod'
+          ? object.spec
+          : object.spec.template.spec
+
+    - name: allContainers
+      expression: >-
+        variables.podSpec.containers +
+        (has(variables.podSpec.initContainers)
+          ? variables.podSpec.initContainers
+          : [])
+
+  validations:
+
+    # ---------------------------------------------------------
+    # Rule 1: Require non-root execution
+    # ---------------------------------------------------------
+    - expression: >-
+        has(variables.podSpec.securityContext) &&
+        has(variables.podSpec.securityContext.runAsNonRoot) &&
+        variables.podSpec.securityContext.runAsNonRoot == true &&
+        has(variables.podSpec.securityContext.runAsUser) &&
+        variables.podSpec.securityContext.runAsUser > 0 &&
+        variables.allContainers.all(c,
+          !has(c.securityContext) ||
+          (
+            (!has(c.securityContext.runAsUser) ||
+              c.securityContext.runAsUser > 0) &&
+            (!has(c.securityContext.runAsNonRoot) ||
+              c.securityContext.runAsNonRoot == true)
+          )
+        )
+      message: >-
+        Workloads must run as non-root. Set pod-level
+        runAsNonRoot to true and runAsUser to a non-zero UID.
+        Containers must not override these settings with root.
+
+    # ---------------------------------------------------------
+    # Rule 2: Prohibit privileged containers
+    # ---------------------------------------------------------
+    - expression: >-
+        variables.allContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.privileged) ||
+          c.securityContext.privileged == false
+        )
+      message: >-
+        Privileged containers are not allowed.
+
+    # ---------------------------------------------------------
+    # Rule 3: Prevent privilege escalation
+    # ---------------------------------------------------------
+    - expression: >-
+        variables.allContainers.all(c,
+          has(c.securityContext) &&
+          has(c.securityContext.allowPrivilegeEscalation) &&
+          c.securityContext.allowPrivilegeEscalation == false
+        )
+      message: >-
+        Every container must explicitly set
+        allowPrivilegeEscalation to false.
+
+    # ---------------------------------------------------------
+    # Rule 4: Require CPU and memory requests and limits
+    # ---------------------------------------------------------
+    - expression: >-
+        variables.allContainers.all(c,
+          has(c.resources) &&
+          has(c.resources.requests) &&
+          'cpu' in c.resources.requests &&
+          'memory' in c.resources.requests &&
+          has(c.resources.limits) &&
+          'cpu' in c.resources.limits &&
+          'memory' in c.resources.limits
+        )
+      message: >-
+        Every container must define CPU and memory requests
+        and CPU and memory limits.
+
+    # ---------------------------------------------------------
+    # Rule 5: Prohibit latest and untagged images
+    # ---------------------------------------------------------
+    - expression: >-
+        variables.allContainers.all(c,
+          c.image.matches('^.+:[^/:]+$') ||
+          c.image.matches('^.+@sha256:[a-f0-9]{64}$')
+        ) &&
+        variables.allContainers.all(c,
+          !c.image.endsWith(':latest')
+        )
+      message: >-
+        Every container image must use an explicit version tag
+        or a SHA256 digest. The latest tag is prohibited.
+
+    # ---------------------------------------------------------
+    # Rule 6: Disable automatic ServiceAccount token mounting
+    # ---------------------------------------------------------
+    - expression: >-
+        has(variables.podSpec.automountServiceAccountToken) &&
+        variables.podSpec.automountServiceAccountToken == false
+      message: >-
+        Workloads must explicitly set
+        automountServiceAccountToken to false.

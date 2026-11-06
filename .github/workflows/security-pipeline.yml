@@ -1,4 +1,3 @@
-
 name: DevSecOps Policy Pipeline
 
 run-name: "DevSecOps Policy Pipeline: ${{ github.event_name }} on ${{ github.ref_name }} (run #${{ github.run_number }})"
@@ -14,12 +13,15 @@ permissions:
   contents: read
 
 jobs:
+
   # ===========================================================
-  # Gate 0: Secret detection
+  # Gate 0: Secret Detection
   # ===========================================================
+
   secrets:
-    name: "Gate 0: Secret detection"
+    name: "Gate 0: Secret Detection"
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository history
         uses: actions/checkout@v6
@@ -32,12 +34,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
 
+
   # ===========================================================
-  # Gate 1: Source code and dependencies
+  # Gate 1: Source Code and Dependency Security
   # ===========================================================
+
   source-security:
-    name: "Gate 1: Source and dependencies"
+    name: "Gate 1: Source and Dependencies"
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -67,12 +72,15 @@ jobs:
           python -m pip install pip-audit==2.9.0
           pip-audit -r requirements.txt
 
+
   # ===========================================================
-  # Gate 2: Dockerfile
+  # Gate 2: Dockerfile Security
   # ===========================================================
+
   dockerfile-lint:
-    name: "Gate 2: Dockerfile lint"
+    name: "Gate 2: Dockerfile Lint"
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -83,15 +91,19 @@ jobs:
             -i hadolint/hadolint:v2.15.1 \
             hadolint --failure-threshold warning - < Dockerfile
 
+
   # ===========================================================
-  # Gate 3: Container image
+  # Gate 3: Container Image Security
   # ===========================================================
+
   container-security:
-    name: "Gate 3: Container image"
+    name: "Gate 3: Container Image Security"
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       security-events: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -102,7 +114,7 @@ jobs:
             --tag devsecops-policy-pipeline:${{ github.sha }} \
             .
 
-      - name: Scan image with Trivy (fail on HIGH and CRITICAL)
+      - name: Scan image with Trivy (HIGH and CRITICAL)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
@@ -130,11 +142,13 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-container
 
+
   # ===========================================================
-  # Gate 4: Infrastructure as Code and policy
+  # Gate 4: Infrastructure as Code and Terraform Policies
   # ===========================================================
+
   terraform-security:
-    name: "Gate 4: Infrastructure and policy"
+    name: "Gate 4: Infrastructure and Policy"
     runs-on: ubuntu-latest
 
     steps:
@@ -161,17 +175,14 @@ jobs:
           sudo tar -C /usr/local/bin -xzf /tmp/conftest.tar.gz conftest
           conftest --version
 
-      # Checkov: secure Terraform must pass.
-      - name: "Checkov: secure Terraform must pass"
+      - name: Checkov - Secure Terraform must pass
         run: |
           checkov \
             --directory terraform/secure \
             --framework terraform \
             --compact
 
-      # Checkov: insecure Terraform must produce findings.
-      # These failures are expected because this is a negative test fixture.
-      - name: "Checkov: insecure Terraform must be detected"
+      - name: Checkov - Insecure Terraform must be detected
         run: |
           python - <<'PY'
           import json
@@ -205,25 +216,25 @@ jobs:
               print("ERROR: Checkov did not detect the expected insecure configuration.")
               sys.exit(1)
 
-          print(f"PASS: Checkov detected {len(failed_checks)} insecure Terraform configuration(s).")
+          print(
+              f"PASS: Checkov detected {len(failed_checks)} "
+              "insecure Terraform configuration(s)."
+          )
           PY
 
-      # Conftest: validate the Rego policy unit tests.
-      - name: "Conftest: verify Rego policy tests"
+      - name: Conftest - Verify Rego policy tests
         run: |
           conftest verify \
             --policy policies/conftest/terraform
 
-      # Conftest: secure Terraform must pass every policy.
-      - name: "Conftest: secure Terraform must pass"
+      - name: Conftest - Secure Terraform must pass
         run: |
           conftest test \
             --policy policies/conftest/terraform \
             --parser hcl2 \
             terraform/secure
 
-      # Conftest: insecure Terraform must trigger all three custom rules.
-      - name: "Conftest: insecure Terraform must be detected"
+      - name: Conftest - Insecure Terraform must be detected
         run: |
           python - <<'PY'
           import subprocess
@@ -271,11 +282,13 @@ jobs:
           print("PASS: Conftest detected all three expected Terraform policy violations.")
           PY
 
+
   # ===========================================================
-  # Gate 5: Kubernetes policy enforcement
+  # Gate 5: Kubernetes Policy Enforcement (Conftest)
   # ===========================================================
+
   kubernetes-security:
-    name: "Gate 5: Kubernetes policy enforcement"
+    name: "Gate 5: Kubernetes Policy Enforcement"
     runs-on: ubuntu-latest
 
     steps:
@@ -289,24 +302,19 @@ jobs:
             -o /tmp/conftest.tar.gz
 
           sudo tar -C /usr/local/bin -xzf /tmp/conftest.tar.gz conftest
-
           conftest --version
 
-      # Verify the custom Kubernetes Rego unit tests.
       - name: Verify Kubernetes Rego policies
         run: |
           conftest verify \
             --policy policies/conftest/kubernetes
 
-      # The real application Deployment must pass.
       - name: Validate secure Kubernetes manifests
         run: |
           conftest test \
             --policy policies/conftest/kubernetes \
             k8s/deployment.yaml
 
-      # The insecure fixture must fail with all expected violations.
-      # Python interprets the expected nonzero exit code as a successful negative test.
       - name: Verify detection of insecure Kubernetes manifests
         run: |
           python - <<'PY'
@@ -360,13 +368,76 @@ jobs:
           print("PASS: All expected Kubernetes policy violations were detected.")
           PY
 
-  # ===========================================================
-  # Gate 6: Software supply-chain security
-  # ===========================================================
-  supply-chain-security:
-    name: "Gate 6: Software supply-chain security"
 
-    # Publish only after every security gate succeeds.
+  # ===========================================================
+  # Gate 6: Kyverno Admission Policy Testing
+  # ===========================================================
+
+  kyverno-policy-tests:
+    name: "Gate 6: Kyverno Policy Tests"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Kyverno CLI
+        uses: kyverno/action-install-cli@v0.2.0
+        with:
+          release: v1.19.2
+
+      - name: Check Kyverno CLI version
+        run: kyverno version
+
+      - name: Test secure Kubernetes workload
+        run: |
+          kyverno apply \
+            policies/kyverno/admission/secure-workload-policy.yaml \
+            --resource k8s/deployment.yaml
+
+      - name: Verify rejection of insecure Kubernetes workload
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          command = [
+              "kyverno",
+              "apply",
+              "policies/kyverno/admission/secure-workload-policy.yaml",
+              "--resource",
+              "k8s/kyverno/insecure-deployment.yaml",
+          ]
+
+          result = subprocess.run(
+              command,
+              capture_output=True,
+              text=True,
+          )
+
+          output = result.stdout + result.stderr
+
+          if result.returncode == 0:
+              print("ERROR: Kyverno unexpectedly accepted the insecure workload.")
+              print(output)
+              sys.exit(1)
+
+          print("PASS: Kyverno rejected the insecure workload as expected.")
+          print(output)
+          PY
+
+
+  # ===========================================================
+  # Gate 7: Software Supply-Chain Security
+  # ===========================================================
+
+  supply-chain-security:
+    name: "Gate 7: Software Supply-Chain Security"
+
+    # All security gates must pass before publishing.
     needs:
       - secrets
       - source-security
@@ -374,9 +445,10 @@ jobs:
       - container-security
       - terraform-security
       - kubernetes-security
+      - kyverno-policy-tests
 
-    # Do not publish images from pull requests.
-    # Allow main-branch pushes and manual runs on main.
+    # Publish only from main branch.
+    # Pull requests must never publish images.
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
 
     runs-on: ubuntu-latest
@@ -413,7 +485,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build and push an immutable commit-tagged image.
       - name: Build and push container image
         id: build
         uses: docker/build-push-action@v6.18.0
@@ -426,7 +497,6 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=devsecops-policy-pipeline
 
-      # Scan the exact published digest before signing or attesting it.
       - name: Scan published image digest with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -438,7 +508,6 @@ jobs:
           exit-code: "1"
           format: table
 
-      # Generate a CycloneDX SBOM from the published image.
       - name: Generate container SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -448,7 +517,6 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
-      # Upload the SBOM as a downloadable workflow artifact.
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
@@ -457,14 +525,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Sign the immutable image digest using GitHub OIDC.
       - name: Sign container image with Cosign
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
-      # Verify that the signature belongs to this workflow.
       - name: Verify container image signature
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -474,7 +540,6 @@ jobs:
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
-      # Attach the SBOM to the exact image digest as an attestation.
       - name: Create SBOM attestation
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -485,7 +550,6 @@ jobs:
             --predicate sbom.cdx.json \
             "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
-      # Verify the attestation's signature and identity.
       - name: Verify SBOM attestation
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}

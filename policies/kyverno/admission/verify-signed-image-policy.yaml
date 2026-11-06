@@ -1,0 +1,121 @@
+
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+
+metadata:
+  name: verify-devsecops-pipeline-images
+
+spec:
+  validationActions:
+    - Deny
+
+  failurePolicy: Fail
+
+  webhookConfiguration:
+    timeoutSeconds: 30
+
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        app: policy-pipeline
+
+    resourceRules:
+      # Pods
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - pods
+
+      # Apps workload controllers
+      - apiGroups:
+          - apps
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+          - replicasets
+
+      # Batch workload controllers
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+          - cronjobs
+
+  # Only verify images from this project's GHCR repository.
+  matchImageReferences:
+    - glob: "ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline*"
+
+  # Require immutable image references.
+  validationConfigurations:
+    mutateDigest: true
+    required: true
+    verifyDigest: true
+
+  # GitHub Actions keyless signing identity.
+  attestors:
+    - name: githubActions
+      cosign:
+        keyless:
+          identities:
+            - subject: "https://github.com/muhammad-ahmadd-shafiq/devsecops-policy-pipeline/.github/workflows/security-pipeline.yml@refs/heads/main"
+              issuer: "https://token.actions.githubusercontent.com"
+        ctlog:
+          url: "https://rekor.sigstore.dev"
+
+  # The SBOM was created using:
+  # cosign attest --type cyclonedx --predicate sbom.cdx.json
+  attestations:
+    - name: sbom
+      intoto:
+        type: "https://cyclonedx.org/bom"
+
+  validations:
+    # Verify the image's Cosign signature.
+    - expression: >-
+        images.containers.map(
+          image,
+          verifyImageSignatures(image, [attestors.githubActions])
+        ).all(result, result > 0)
+      message: >-
+        Container image must have a valid Cosign keyless signature
+        from the approved GitHub Actions workflow.
+
+    # Verify the SBOM attestation signature.
+    - expression: >-
+        images.containers.map(
+          image,
+          verifyAttestationSignatures(
+            image,
+            attestations.sbom,
+            [attestors.githubActions]
+          )
+        ).all(result, result > 0)
+      message: >-
+        Container image must have a valid CycloneDX SBOM attestation
+        signed by the approved GitHub Actions workflow.
+
+    # Check that the attested SBOM actually identifies CycloneDX.
+    - expression: >-
+        images.containers.map(
+          image,
+          extractPayload(image, attestations.sbom).predicate.bomFormat
+            == 'CycloneDX'
+        ).all(result, result)
+      message: >-
+        The verified SBOM attestation must contain a CycloneDX predicate.

@@ -1,0 +1,31 @@
+
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: unsigned-image-test
+  namespace: policy-pipeline
+  labels:
+    app: policy-pipeline
+
+spec:
+  automountServiceAccountToken: false
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+
+  containers:
+    - name: app
+      image: ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline:unsigned-test
+
+      securityContext:
+        allowPrivilegeEscalation: false
+
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
