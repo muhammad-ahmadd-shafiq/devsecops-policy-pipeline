@@ -447,8 +447,7 @@ jobs:
       - kubernetes-security
       - kyverno-policy-tests
 
-    # Publish only from main branch.
-    # Pull requests must never publish images.
+    # Publish only from main.
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
 
     runs-on: ubuntu-latest
@@ -457,6 +456,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
 
     env:
       IMAGE_NAME: ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline
@@ -467,16 +467,28 @@ jobs:
         with:
           persist-credentials: false
 
+      # -------------------------------------------------------
+      # 1. Install Cosign
+      # -------------------------------------------------------
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v4.1.0
         with:
           cosign-release: v3.1.3
 
-      - name: Check Cosign installation
+      - name: Verify Cosign installation
         run: cosign version
+
+      # -------------------------------------------------------
+      # 2. Configure Docker Buildx
+      # -------------------------------------------------------
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
+
+      # -------------------------------------------------------
+      # 3. Authenticate with GHCR
+      # -------------------------------------------------------
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3.6.0
@@ -485,19 +497,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # -------------------------------------------------------
+      # 4. Build and publish image
+      # -------------------------------------------------------
+
       - name: Build and push container image
         id: build
         uses: docker/build-push-action@v6.18.0
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=devsecops-policy-pipeline
 
-      - name: Scan published image digest with Trivy
+          # Generate detailed BuildKit provenance.
+          provenance: mode=max
+
+      # -------------------------------------------------------
+      # 5. Scan published image by immutable digest
+      # -------------------------------------------------------
+
+      - name: Scan published image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
@@ -508,14 +534,30 @@ jobs:
           exit-code: "1"
           format: table
 
-      - name: Generate container SBOM
+      # -------------------------------------------------------
+      # 6. Generate SBOM for exact published image digest
+      # -------------------------------------------------------
+
+      - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
           upload-artifact: false
           upload-release-assets: false
+
+      # -------------------------------------------------------
+      # 7. Validate SBOM
+      # -------------------------------------------------------
+
+      - name: Validate SBOM structure
+        run: |
+          python scripts/validate_sbom.py sbom.cdx.json
+
+      # -------------------------------------------------------
+      # 8. Upload SBOM as workflow artifact
+      # -------------------------------------------------------
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -525,11 +567,19 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Sign container image with Cosign
+      # -------------------------------------------------------
+      # 9. Sign image using Cosign keyless signing
+      # -------------------------------------------------------
+
+      - name: Sign container image
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+      # -------------------------------------------------------
+      # 10. Verify image signature
+      # -------------------------------------------------------
 
       - name: Verify container image signature
         env:
@@ -539,6 +589,10 @@ jobs:
             --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+      # -------------------------------------------------------
+      # 11. Create Cosign SBOM attestation
+      # -------------------------------------------------------
 
       - name: Create SBOM attestation
         env:
@@ -550,18 +604,65 @@ jobs:
             --predicate sbom.cdx.json \
             "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
+      # -------------------------------------------------------
+      # 12. Verify Cosign SBOM attestation
+      # -------------------------------------------------------
+
       - name: Verify SBOM attestation
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "Starting SBOM attestation verification..."
+          cosign verify-attestation \
+            --type cyclonedx \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
-          timeout --signal=TERM --kill-after=10s 3m \
-            cosign --verbose --timeout 2m verify-attestation \
-              --type cyclonedx \
-              --output text \
-              --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/security-pipeline.yml@refs/heads/main" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              "${IMAGE_NAME}@${IMAGE_DIGEST}"
+      # -------------------------------------------------------
+      # 13. Generate signed GitHub build provenance
+      # -------------------------------------------------------
 
-          echo "SBOM attestation successfully verified."
+      - name: Generate SLSA build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # -------------------------------------------------------
+      # 14. Verify build provenance
+      # -------------------------------------------------------
+
+      - name: Verify SLSA build provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Verifying image build provenance..."
+
+          gh attestation verify \
+            "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/security-pipeline.yml" \
+            --source-ref "refs/heads/main"
+
+          echo "Build provenance verification successful."
+
+      # -------------------------------------------------------
+      # 15. Print published artifact information
+      # -------------------------------------------------------
+
+      - name: Display supply-chain artifact information
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "=========================================="
+          echo "SUPPLY-CHAIN SECURITY SUMMARY"
+          echo "=========================================="
+          echo "Image: ${IMAGE_NAME}"
+          echo "Digest: ${IMAGE_DIGEST}"
+          echo "SBOM: sbom.cdx.json"
+          echo "Image signature: Verified"
+          echo "SBOM attestation: Verified"
+          echo "Build provenance: Verified"
+          echo "=========================================="

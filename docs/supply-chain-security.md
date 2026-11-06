@@ -1,75 +1,205 @@
-# Phase 4: Software Supply Chain Security
+
+# Software Supply-Chain Security
 
 ## Overview
 
-This phase implements software supply-chain security for the DevSecOps Policy Pipeline.
+This phase implements software supply-chain security controls for the
+DevSecOps Policy Pipeline.
 
-The objective is to establish component transparency, image integrity, and verifiable build identity.
+The objective is to ensure that container images are built, scanned,
+documented, signed, and verified before they are allowed to run in
+Kubernetes.
 
-## Technologies
+The implementation uses:
 
-- Syft: Generates Software Bill of Materials.
-- CycloneDX: SBOM data format.
-- Cosign: Container image signing and verification.
-- Sigstore: Keyless signing infrastructure.
-- GitHub Actions OIDC: Workload identity.
-- GitHub Container Registry: Container image storage.
+- Docker Buildx
+- GitHub Container Registry
+- Trivy
+- Anchore Syft
+- CycloneDX
+- Cosign
+- GitHub Actions OIDC
+- GitHub Artifact Attestations
+- SLSA Build Provenance
+- Kyverno ImageValidatingPolicy
 
-## Implementation
+## 1. Secure Image Build
 
-### 1. SBOM Generation
+The supply-chain-security job runs only after the preceding security
+gates have passed.
 
-Syft scans the built container image and generates a CycloneDX JSON SBOM.
+It builds the application image using Docker Buildx and publishes it
+to GitHub Container Registry.
 
-The SBOM identifies software components and their versions, including operating system packages and application dependencies.
+Images are tagged using the Git commit SHA.
 
-### 2. Container Image Publishing
+The build also generates maximum-detail BuildKit provenance.
 
-GitHub Actions builds and pushes the image to GHCR.
+Published images are referenced by their immutable SHA-256 digest
+for subsequent security operations.
 
-Images are tagged using the Git commit SHA to provide traceability.
+## 2. Container Vulnerability Scanning
 
-### 3. Keyless Image Signing
+Trivy scans the published image by digest.
 
-Cosign signs the immutable image digest using GitHub Actions OIDC.
+The configured pipeline fails when HIGH or CRITICAL vulnerabilities
+are detected, subject to the ignore-unfixed setting.
 
-The workflow does not store a permanent Cosign private key in GitHub Secrets.
+This prevents images that violate the configured vulnerability
+threshold from progressing through the publishing workflow.
 
-Sigstore issues a short-lived signing certificate based on the workflow identity.
+## 3. Software Bill of Materials
 
-### 4. Signature Verification
+Anchore Syft generates a CycloneDX JSON Software Bill of Materials.
 
-Cosign verifies the image signature against the expected GitHub Actions workflow identity and OIDC issuer.
+The SBOM describes the components discovered in the published
+container image.
 
-### 5. SBOM Attestation
+A custom Python validation script checks:
 
-The CycloneDX SBOM is attached to the image digest as a signed attestation.
+- Valid JSON structure
+- CycloneDX format
+- Specification version
+- Non-empty component list
+- SBOM serial number
 
-Cosign verifies the attestation's cryptographic signature and identity.
+The resulting SBOM is uploaded as a GitHub Actions artifact.
 
-### 6. CI/CD Integration
+## 4. Image Signing with Cosign
 
-The supply-chain job runs only after the existing security jobs succeed and only publishes from the main branch.
+Cosign uses keyless signing through GitHub Actions OIDC.
 
-Pull requests do not publish or sign container images.
+The workflow obtains a short-lived signing identity instead of
+depending on a long-lived private signing key.
 
-## Security Benefits
+The image is signed using its immutable digest.
 
-- Improved software component visibility.
-- Image provenance and signer identity verification.
-- Cryptographic image integrity.
-- Reduced reliance on long-lived signing secrets.
-- SBOM retention for audit and vulnerability investigation.
-- Traceability between source commits and published images.
+The workflow verifies the signature using:
 
-## Limitations
+- Expected certificate identity
+- GitHub Actions OIDC issuer
+- Published image digest
 
-A valid image signature does not prove that the image is free of vulnerabilities.
+## 5. SBOM Attestation
 
-An SBOM identifies components but does not independently establish that those components are safe.
+The pipeline creates a Cosign CycloneDX attestation.
 
-Vulnerability scanning, policy enforcement, and trusted image verification remain necessary.
+The attestation binds the SBOM to the published image digest.
 
-## Future Integration
+The pipeline subsequently verifies the attestation using the
+expected GitHub Actions signing identity.
 
-The next stage will enforce image trust at Kubernetes admission time so that unsigned or untrusted images cannot be deployed.
+## 6. SLSA Build Provenance
+
+GitHub Actions generates a signed SLSA build provenance attestation
+for the published container image.
+
+The attestation is associated with the image digest and published
+to the container registry.
+
+The GitHub CLI verifies the provenance and checks the expected
+repository, workflow, and source branch.
+
+BuildKit provenance is also enabled with mode=max.
+
+## 7. Kubernetes Admission Enforcement
+
+Kyverno ImageValidatingPolicy enforces image trust requirements.
+
+The policy checks:
+
+1. Image signature validity.
+2. Trusted GitHub Actions signing identity.
+3. CycloneDX SBOM attestation.
+4. SBOM document format.
+5. SLSA provenance attestation.
+
+Image validation is configured to require digest-based references.
+
+Images that fail the configured trust requirements are denied.
+
+## 8. Negative Testing
+
+The project includes tests for:
+
+- Unsigned container images.
+- Images signed using an untrusted local key.
+- Rejection of untrusted images during Kubernetes admission.
+- Acceptance of a correctly signed image.
+
+These tests demonstrate that image admission depends on trusted
+cryptographic evidence rather than simply the presence of an image.
+
+## 9. Supply-Chain Security Architecture
+
+```text
+Source Repository
+       |
+       v
+GitHub Actions Security Gates
+       |
+       v
+Docker Buildx
+       |
+       +---- BuildKit Provenance
+       |
+       v
+Container Image
+       |
+       v
+GitHub Container Registry
+       |
+       +---- Trivy Vulnerability Scan
+       |
+       +---- CycloneDX SBOM
+       |
+       +---- Cosign Image Signature
+       |
+       +---- Cosign SBOM Attestation
+       |
+       +---- GitHub SLSA Provenance
+       |
+       v
+Cryptographic Verification
+       |
+       v
+Kubernetes Admission Controller
+       |
+       v
+Kyverno ImageValidatingPolicy
+       |
+       +---- Verify Image Signature
+       |
+       +---- Verify SBOM Attestation
+       |
+       +---- Verify Build Provenance
+       |
+       v
+Trusted Deployment
+```
+
+## 10. Security Outcome
+
+The completed implementation establishes a verifiable chain of
+trust between the source repository, container build, published
+image, software inventory, signing identity, and Kubernetes
+admission process.
+
+The pipeline does not rely solely on successful image building
+or vulnerability scanning.
+
+It also verifies cryptographic evidence before trusting an
+artifact for deployment.
+
+## Verification Status
+
+Phase 6 is complete only after:
+
+- The GitHub Actions supply-chain job passes.
+- The image signature is successfully verified.
+- The SBOM is generated and validated.
+- The SBOM attestation is successfully verified.
+- The SLSA provenance is successfully verified.
+- Kyverno admits the trusted image.
+- Kyverno rejects an unsigned image.
+- Kyverno rejects an image signed by an untrusted identity.

@@ -1,0 +1,6 @@
+# Use the existing published image by its immutable digest.
+FROM ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline@sha256:0db03d9d78b6491215e4e979c8a176af9e3958c543d9bd7eb7e56c21bcbca9cd
+
+# Modify image metadata to produce a different image digest.
+LABEL org.opencontainers.image.description="Unsigned image admission control test"
+LABEL security.test="unsigned-image"
