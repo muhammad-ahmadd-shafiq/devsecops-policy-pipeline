@@ -24,7 +24,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev=17.11-0+deb13u1 \
+    libpq-dev=17.12-0+deb13u1 \
+    libpq5=17.12-0+deb13u1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 appuser \
     && useradd --system --uid 1001 --gid appuser --no-create-home appuser
