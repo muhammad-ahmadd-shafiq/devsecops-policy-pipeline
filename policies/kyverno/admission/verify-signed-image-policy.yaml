@@ -6,8 +6,8 @@ metadata:
   name: verify-devsecops-pipeline-images
 
 spec:
+  failurePolicy: Fail
 
-  # Apply image verification to Pod creation and updates.
   matchConstraints:
     resourceRules:
       - apiGroups:
@@ -20,65 +20,67 @@ spec:
         resources:
           - pods
 
-  # Only enforce these requirements on our project image.
+      - apiGroups:
+          - apps
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+          - replicasets
+
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+          - cronjobs
+
   matchImageReferences:
-    - glob: "ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline*"
+    - glob: ghcr.io/muhammad-ahmadd-shafiq/devsecops-policy-pipeline*
 
-  # Fail closed if image verification cannot be completed.
-  failurePolicy: Fail
+  attestors:
+    - name: githubActions
+      cosign:
+        ctlog:
+          url: https://rekor.sigstore.dev
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subject: https://github.com/muhammad-ahmadd-shafiq/devsecops-policy-pipeline/.github/workflows/security-pipeline.yml@refs/heads/main
 
-  webhookConfiguration:
-    timeoutSeconds: 30
+  attestations:
+    - name: sbom
+      intoto:
+        type: https://cyclonedx.org/bom
 
-  # Reject workloads that fail verification.
   validationActions:
     - Deny
 
-  # Require digest-based image references.
   validationConfigurations:
     mutateDigest: true
     required: true
     verifyDigest: true
 
-  # Trusted signing identity from GitHub Actions.
-  attestors:
-    - name: githubActions
-
-      cosign:
-        keyless:
-          identities:
-            - issuer: "https://token.actions.githubusercontent.com"
-              subject: "https://github.com/muhammad-ahmadd-shafiq/devsecops-policy-pipeline/.github/workflows/security-pipeline.yml@refs/heads/main"
-
-        ctlog:
-          url: "https://rekor.sigstore.dev"
-
-  # Attestations expected for the image.
-  attestations:
-
-    # CycloneDX SBOM created using Cosign.
-    - name: sbom
-      intoto:
-        type: "https://cyclonedx.org/bom"
-
-    # SLSA provenance created using GitHub Actions.
-    - name: provenance
-      intoto:
-        type: "https://slsa.dev/provenance/v1"
-
   validations:
-
-    # 1. Require a valid Cosign image signature.
-    - message: "Image must be signed by the trusted GitHub Actions workflow."
-      expression: >-
+    - expression: |
         images.containers.map(
           image,
           verifyImageSignatures(image, [attestors.githubActions])
         ).all(result, result > 0)
+      message: >-
+        Container image must have a valid Cosign keyless signature
+        from the approved GitHub Actions workflow.
 
-    # 2. Require a valid signed SBOM attestation.
-    - message: "Image must have a valid signed CycloneDX SBOM attestation."
-      expression: >-
+    - expression: |
         images.containers.map(
           image,
           verifyAttestationSignatures(
@@ -87,23 +89,18 @@ spec:
             [attestors.githubActions]
           )
         ).all(result, result > 0)
+      message: >-
+        Container image must have a valid CycloneDX SBOM attestation
+        signed by the approved GitHub Actions workflow.
 
-    # 3. Verify the SBOM format.
-    - message: "Image SBOM attestation must contain a CycloneDX document."
-      expression: >-
+    - expression: |
         images.containers.map(
           image,
-          extractPayload(image, attestations.sbom).predicate.bomFormat == "CycloneDX"
+          extractPayload(image, attestations.sbom).predicate.bomFormat
+            == 'CycloneDX'
         ).all(result, result)
+      message: >-
+        The verified SBOM attestation must contain a CycloneDX predicate.
 
-    # 4. Require a valid signed SLSA provenance attestation.
-    - message: "Image must have valid signed SLSA build provenance."
-      expression: >-
-        images.containers.map(
-          image,
-          verifyAttestationSignatures(
-            image,
-            attestations.provenance,
-            [attestors.githubActions]
-          )
-        ).all(result, result > 0)
+  webhookConfiguration:
+    timeoutSeconds: 30
